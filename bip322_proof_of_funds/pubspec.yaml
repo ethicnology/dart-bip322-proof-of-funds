@@ -1,0 +1,26 @@
+name: bip322_proof_of_funds
+description: BIP-322 Generic Signed Message Format for Bitcoin, pure Dart — a discoverability alias re-exporting the `bip322` package under its Proof-of-Funds name.
+version: 1.0.0
+publish_to: none
+repository: https://github.com/ethicnology/dart-bip322
+homepage: https://github.com/ethicnology/dart-bip322
+issue_tracker: https://github.com/ethicnology/dart-bip322/issues
+topics:
+  - bitcoin
+  - bip322
+  - signature
+  - cryptography
+  - psbt
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  # TODO: switch to a hosted version constraint (e.g. bip322: ^1.0.0) once
+  # bip322 is published to pub.dev — a path dependency cannot be published.
+  bip322:
+    path: ../
+
+dev_dependencies:
+  lints: ^6.1.0
+  test: ^1.31.2

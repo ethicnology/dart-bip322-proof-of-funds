@@ -13,15 +13,20 @@
 
 include: package:lints/recommended.yaml
 
+# `bip322_proof_of_funds/` is a separate, independently-published package (a
+# discoverability alias that re-exports this one). It has its own pubspec and
+# is analyzed/tested on its own; exclude it here so this package's analysis
+# does not try to resolve `package:bip322_proof_of_funds/...` or flag its path
+# dependency.
+analyzer:
+  exclude:
+    - bip322_proof_of_funds/**
+
 # Uncomment the following section to specify additional rules.
 
 # linter:
 #   rules:
 #     - camel_case_types
-
-# analyzer:
-#   exclude:
-#     - path/to/excluded/files/**
 
 # For more information about the core and recommended set of lints, see
 # https://dart.dev/go/core-lints

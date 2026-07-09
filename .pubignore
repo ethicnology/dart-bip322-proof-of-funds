@@ -1,0 +1,7 @@
+# The nested `bip322_proof_of_funds/` directory is a SEPARATE, independently-
+# published package (a discoverability alias that re-exports this package). It
+# must never be bundled into the `bip322` archive, so exclude it from
+# `dart pub publish`.
+#
+# See the "Related package: bip322_proof_of_funds" section in README.md.
+bip322_proof_of_funds/
