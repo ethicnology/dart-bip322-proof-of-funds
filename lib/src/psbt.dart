@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:typed_data';
 
 import 'errors.dart';
@@ -16,6 +17,10 @@ final Uint8List _psbtMagic = Uint8List.fromList([0x70, 0x73, 0x62, 0x74, 0xff]);
 // are already fully signed (BIP-322 Proof of Funds requires the encoded PSBT
 // to be finalized).
 const int _globalUnsignedTx = 0x00;
+// BIP-322 PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE: the UTF-8 message being signed,
+// carried in the global map so a Proof of Funds is self-contained (a verifier
+// recovers the message from the PSBT rather than being told it out-of-band).
+const int _globalGenericSignedMessage = 0x09;
 const int _inNonWitnessUtxo = 0x00;
 const int _inWitnessUtxo = 0x01;
 const int _inFinalScriptSig = 0x07;
@@ -52,11 +57,16 @@ class PsbtInputUtxo {
 /// A parsed, finalized PSBT: the reconstructed [transaction] (unsigned tx with
 /// each input's `final_scriptSig`/`final_scriptWitness` applied) and the
 /// per-input [utxos] needed to recompute sighashes for verification.
+///
+/// [message] is the UTF-8 string from the BIP-322
+/// `PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE` (0x09) global field, or `null` if the
+/// PSBT does not carry it (e.g. a proof produced before this field was set).
 class DecodedPsbt {
   final Transaction transaction;
   final List<PsbtInputUtxo> utxos;
+  final String? message;
 
-  DecodedPsbt(this.transaction, this.utxos);
+  DecodedPsbt(this.transaction, this.utxos, {this.message});
 }
 
 /// Encodes a *finalized* PSBT (BIP-174) wrapping [tx] — every input must
@@ -69,7 +79,16 @@ class DecodedPsbt {
 /// per-input maps carry the witness UTXO plus `final_scriptSig`/
 /// `final_scriptWitness`. Output maps are empty (no BIP32 paths, no proprietary
 /// fields — nothing beyond what a finalized PSBT needs).
-Uint8List encodeFinalizedPsbt(Transaction tx, List<TxOut> spentOutputs) {
+///
+/// When [message] is non-null it is written as the BIP-322
+/// `PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE` (0x09) global field (UTF-8), so a
+/// Proof of Funds carries the signed message itself and a verifier need not be
+/// told it separately.
+Uint8List encodeFinalizedPsbt(
+  Transaction tx,
+  List<TxOut> spentOutputs, {
+  String? message,
+}) {
   if (spentOutputs.length != tx.inputs.length) {
     throw MismatchedSpentOutputCountError(
       tx.inputs.length,
@@ -82,9 +101,15 @@ Uint8List encodeFinalizedPsbt(Transaction tx, List<TxOut> spentOutputs) {
   // Global map: PSBT_GLOBAL_UNSIGNED_TX. The unsigned tx has no witness data;
   // every input this library signs for is native segwit (empty scriptSig), so
   // tx.serialize(withWitness: false) is already the correct unsigned-tx bytes.
-  chunks
-    ..add(_kv(_globalUnsignedTx, const [], tx.serialize(withWitness: false)))
-    ..add(_mapTerminator);
+  chunks.add(
+    _kv(_globalUnsignedTx, const [], tx.serialize(withWitness: false)),
+  );
+  if (message != null) {
+    chunks.add(
+      _kv(_globalGenericSignedMessage, const [], utf8.encode(message)),
+    );
+  }
+  chunks.add(_mapTerminator);
 
   for (var i = 0; i < tx.inputs.length; i++) {
     final input = tx.inputs[i];
@@ -121,8 +146,16 @@ DecodedPsbt decodePsbt(Uint8List bytes) {
   }
 
   Uint8List? unsignedTxBytes;
+  String? message;
   for (final (type, keyData, value) in _readMap(reader)) {
-    if (type == _globalUnsignedTx && keyData.isEmpty) unsignedTxBytes = value;
+    if (type == _globalUnsignedTx && keyData.isEmpty) {
+      unsignedTxBytes = value;
+    } else if (type == _globalGenericSignedMessage && keyData.isEmpty) {
+      // BIP-322 message. Decoded leniently: an ill-formed UTF-8 value must not
+      // abort decoding of an otherwise-valid PSBT (the message is advisory
+      // data a verifier still re-commits to via to_spend.txid).
+      message = utf8.decode(value, allowMalformed: true);
+    }
   }
   if (unsignedTxBytes == null) {
     throw DeserializationException('PSBT missing PSBT_GLOBAL_UNSIGNED_TX');
@@ -181,7 +214,7 @@ DecodedPsbt decodePsbt(Uint8List bytes) {
     ],
     outputs: unsignedTx.outputs,
   );
-  return DecodedPsbt(finalized, utxos);
+  return DecodedPsbt(finalized, utxos, message: message);
 }
 
 /// Reads key-value pairs until the zero-length-key map terminator. Each yielded

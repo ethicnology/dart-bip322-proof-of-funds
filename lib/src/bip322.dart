@@ -14,6 +14,7 @@ import 'exceptions.dart';
 import 'formats.dart';
 import 'keys.dart';
 import 'proof_of_funds.dart';
+import 'proof_of_funds.dart' as pof;
 import 'script.dart';
 import 'signer.dart';
 import 'transaction.dart';
@@ -223,6 +224,24 @@ class Bip322 {
       signature: signature,
     );
   }
+
+  /// Verifies a self-contained `pof` [signature]: the message and challenge
+  /// address are recovered from the proof itself — the message from the
+  /// BIP-322 `PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE` (0x09) global field and the
+  /// challenge scriptPubKey from input 0's witness UTXO — so the caller
+  /// supplies only the proof.
+  ///
+  /// Returns the three-state [ProofOfFundsResult] with the recovered
+  /// [ProofOfFundsResult.message] and [ProofOfFundsResult.challengeScriptPubKey]
+  /// populated, so a caller can display what was signed and for which address.
+  ///
+  /// Fail-closed for malformed/untrusted input (same policy as
+  /// [verifyProofOfFunds]): a missing 0x09 message field, an unextractable
+  /// input-0 scriptPubKey, or any malformed data resolves to
+  /// [ProofOfFundsStatus.invalid] rather than throwing. Never needs [Network]
+  /// because verification works on scriptPubKeys, not address strings.
+  static ProofOfFundsResult verifyProofOfFundsFromSignature(String signature) =>
+      pof.verifyProofOfFundsFromSignature(signature);
 
   /// P2PKH, P2SH-P2WPKH and P2WSH parse successfully as valid Bitcoin
   /// addresses — [parseAddress] recognises them — but this library does not

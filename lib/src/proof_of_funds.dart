@@ -79,12 +79,26 @@ class ProofOfFundsResult {
   /// nSequence of `to_sign`'s first input — "S" in the same phrase.
   final int sequence;
 
+  /// The message the proof commits to, recovered from the PSBT's
+  /// `PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE` (0x09) field. Only populated by
+  /// [verifyProofOfFundsFromSignature] (the self-contained verify path); it is
+  /// `null` when the message was supplied by the caller or the proof does not
+  /// carry the field.
+  final String? message;
+
+  /// The challenge scriptPubKey (input 0's witness UTXO) — the "for this
+  /// address" the proof is signed under. Only populated by
+  /// [verifyProofOfFundsFromSignature]; `null` otherwise.
+  final Uint8List? challengeScriptPubKey;
+
   ProofOfFundsResult(
     this.status,
     this.provenUtxos,
     this.lockTime,
-    this.sequence,
-  );
+    this.sequence, {
+    this.message,
+    this.challengeScriptPubKey,
+  });
 
   bool get isValid => status == ProofOfFundsStatus.valid;
 }
@@ -201,7 +215,7 @@ String buildProofOfFundsSignature({
     for (var i = 0; i < amounts.length; i++)
       TxOut(value: amounts[i], scriptPubKey: Script(scriptPubKeys[i])),
   ];
-  final psbt = encodeFinalizedPsbt(toSign, spentOutputs);
+  final psbt = encodeFinalizedPsbt(toSign, spentOutputs, message: message);
   return proofOfFundsPrefix + base64.encode(psbt);
 }
 
@@ -267,46 +281,141 @@ ProofOfFundsResult verifyProofOfFundsSignature({
   required ParsedAddress challenge,
   required String signature,
 }) {
-  final invalid = ProofOfFundsResult(
-    ProofOfFundsStatus.invalid,
-    const [],
-    0,
-    0,
+  final decoded = _decodePofSignature(signature);
+  if (decoded == null) return _invalidPof;
+  return _verifyDecodedProofOfFunds(
+    decoded: decoded,
+    message: message,
+    challengeScriptPubKey: challenge.scriptPubKey.bytes,
+    challengeType: challenge.type,
+    challengePayload: challenge.payload,
   );
+}
 
-  if (!signature.startsWith(proofOfFundsPrefix)) return invalid;
+/// Verifies a `pof` [signature] that is fully self-contained per BIP-322: the
+/// message is read from the PSBT's `PSBT_GLOBAL_GENERIC_SIGNED_MESSAGE` (0x09)
+/// field and the challenge scriptPubKey from input 0's witness UTXO — the
+/// caller supplies neither.
+///
+/// The returned [ProofOfFundsResult] carries the recovered [message] and
+/// [challengeScriptPubKey] so a caller can display "message M for address A".
+///
+/// Returns [ProofOfFundsStatus.invalid] (never throws for malformed data) if
+/// the prefix/base64/PSBT is malformed, the 0x09 message field is absent, or
+/// input 0 has no extractable scriptPubKey — a self-contained verifier cannot
+/// proceed without both, and must fail closed rather than guess.
+ProofOfFundsResult verifyProofOfFundsFromSignature(String signature) {
+  final decoded = _decodePofSignature(signature);
+  if (decoded == null) return _invalidPof;
+
+  // Message must come from the 0x09 global field for a self-contained proof.
+  final message = decoded.message;
+  if (message == null) return _invalidPof;
+
+  // Challenge scriptPubKey is input 0's witness/non-witness UTXO.
+  if (decoded.transaction.inputs.isEmpty) return _invalidPof;
+  final Uint8List challengeScriptPubKey;
+  try {
+    challengeScriptPubKey = Uint8List.fromList(
+      decoded.utxos[0]
+          .resolve(decoded.transaction.inputs[0].prevout.index)
+          .scriptPubKey
+          .bytes,
+    );
+  } on Bip322Exception {
+    return _invalidPof;
+  }
+
+  final classified = classifyScriptPubKey(Script(challengeScriptPubKey));
+  if (classified == null) {
+    // Challenge address type is not one this library understands (not
+    // P2WPKH/P2TR) — inconclusive per BIP-322, not a hard invalid.
+    return ProofOfFundsResult(
+      ProofOfFundsStatus.inconclusive,
+      const [],
+      decoded.transaction.lockTime,
+      decoded.transaction.inputs[0].sequence,
+      message: message,
+      challengeScriptPubKey: challengeScriptPubKey,
+    );
+  }
+
+  return _verifyDecodedProofOfFunds(
+    decoded: decoded,
+    message: message,
+    challengeScriptPubKey: challengeScriptPubKey,
+    challengeType: classified.type,
+    challengePayload: classified.payload,
+    reportExtracted: true,
+  );
+}
+
+final ProofOfFundsResult _invalidPof = ProofOfFundsResult(
+  ProofOfFundsStatus.invalid,
+  const [],
+  0,
+  0,
+);
+
+/// Decodes a `pof`-prefixed base64 signature into a [DecodedPsbt], or `null`
+/// if the prefix, base64 or PSBT structure is malformed.
+DecodedPsbt? _decodePofSignature(String signature) {
+  if (!signature.startsWith(proofOfFundsPrefix)) return null;
   final Uint8List psbtBytes;
   try {
     psbtBytes = base64.decode(
       base64.normalize(signature.substring(proofOfFundsPrefix.length)),
     );
   } on FormatException {
-    return invalid;
+    return null;
   }
-
-  final DecodedPsbt decoded;
   try {
-    decoded = decodePsbt(psbtBytes);
+    return decodePsbt(psbtBytes);
   } on Bip322Exception {
-    return invalid;
+    return null;
   }
+}
+
+/// Shared verification core: given a decoded `to_sign` PSBT and the challenge
+/// (message + scriptPubKey/type/payload), runs the BIP-322 structural and
+/// cryptographic checks. When [reportExtracted] is set, the returned result
+/// carries the [message]/[challengeScriptPubKey] (used by the self-contained
+/// verify path so callers can surface what the proof was for).
+ProofOfFundsResult _verifyDecodedProofOfFunds({
+  required DecodedPsbt decoded,
+  required String message,
+  required Uint8List challengeScriptPubKey,
+  required AddressType challengeType,
+  required Uint8List challengePayload,
+  bool reportExtracted = false,
+}) {
+  ProofOfFundsResult invalid() => reportExtracted
+      ? ProofOfFundsResult(
+          ProofOfFundsStatus.invalid,
+          const [],
+          0,
+          0,
+          message: message,
+          challengeScriptPubKey: challengeScriptPubKey,
+        )
+      : _invalidPof;
 
   final toSign = decoded.transaction;
   final toSpend = buildToSpend(
     bip322MessageHash(message),
-    challenge.scriptPubKey,
+    Script(challengeScriptPubKey),
   );
 
-  if (toSign.inputs.isEmpty) return invalid;
+  if (toSign.inputs.isEmpty) return invalid();
   final first = toSign.inputs[0].prevout;
   if (!bytesEqual(first.hash, toSpend.hashForId()) || first.index != 0) {
-    return invalid;
+    return invalid();
   }
-  if (toSign.outputs.length != 1) return invalid;
+  if (toSign.outputs.length != 1) return invalid();
   final out = toSign.outputs[0];
   if (out.value != 0 ||
       !bytesEqual(out.scriptPubKey.bytes, Script.opReturn().bytes)) {
-    return invalid;
+    return invalid();
   }
 
   final amounts = <int>[];
@@ -316,27 +425,26 @@ ProofOfFundsResult verifyProofOfFundsSignature({
     try {
       spent = decoded.utxos[i].resolve(toSign.inputs[i].prevout.index);
     } on Bip322Exception {
-      return invalid;
+      return invalid();
     }
     amounts.add(spent.value);
     scriptPubKeys.add(spent.scriptPubKey.bytes);
   }
   // Input 0 must actually spend to_spend's own (synthetic) output — a PSBT
   // claiming a different witness UTXO for it must not be trusted.
-  if (amounts[0] != 0 ||
-      !bytesEqual(scriptPubKeys[0], challenge.scriptPubKey.bytes)) {
-    return invalid;
+  if (amounts[0] != 0 || !bytesEqual(scriptPubKeys[0], challengeScriptPubKey)) {
+    return invalid();
   }
 
   if (!_verifyInput(
     toSign,
     0,
-    challenge.type,
-    challenge.payload,
+    challengeType,
+    challengePayload,
     amounts,
     scriptPubKeys,
   )) {
-    return invalid;
+    return invalid();
   }
 
   final proven = <OutPoint>[];
@@ -355,7 +463,7 @@ ProofOfFundsResult verifyProofOfFundsSignature({
       amounts,
       scriptPubKeys,
     )) {
-      return invalid;
+      return invalid();
     }
     proven.add(toSign.inputs[i].prevout);
   }
@@ -370,6 +478,8 @@ ProofOfFundsResult verifyProofOfFundsSignature({
     proven,
     toSign.lockTime,
     toSign.inputs[0].sequence,
+    message: reportExtracted ? message : null,
+    challengeScriptPubKey: reportExtracted ? challengeScriptPubKey : null,
   );
 }
 
