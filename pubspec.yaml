@@ -1,15 +1,40 @@
-name: dart_bip322
-description: A starting point for Dart libraries or applications.
+name: bip322
+description: A from-scratch Dart implementation of BIP-322 Generic Signed Message Format for Bitcoin (sign & verify).
 version: 1.0.0
-# repository: https://github.com/my_org/my_repo
+# Depends on `bip341` and `bdk_dart` via git (neither is on pub.dev yet), so
+# this package is not itself publishable to pub.dev. Remove this once those
+# dependencies are hosted and the git deps become version constraints.
+publish_to: none
+repository: https://github.com/ethicnology/dart-bip322
+homepage: https://github.com/ethicnology/dart-bip322
+issue_tracker: https://github.com/ethicnology/dart-bip322/issues
+topics:
+  - bitcoin
+  - bip322
+  - signature
+  - cryptography
+  - psbt
 
 environment:
   sdk: ^3.12.2
 
-# Add regular dependencies here.
 dependencies:
-  # path: ^1.9.0
+  bip341:
+    git:
+      url: git@github.com:ethicnology/dart-bip341-taproot.git
+      ref: main
+  elliptic: ^0.3.12
+  ecdsa: ^0.1.2
+  bip340: ^0.3.1
+  pointycastle: ^4.0.0
+  bech32: ^0.2.2
+  bs58check: ^1.0.2
+  hex: ^0.2.0
 
 dev_dependencies:
-  lints: ^6.0.0
-  test: ^1.25.6
+  bdk_dart:
+    git:
+      url: https://github.com/bitcoindevkit/bdk-dart.git
+      ref: v1.0.0-rc.3
+  lints: ^6.1.0
+  test: ^1.31.2
