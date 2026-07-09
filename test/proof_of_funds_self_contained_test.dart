@@ -46,6 +46,19 @@ void main() {
     });
   });
 
+  group('addressFromScriptPubKey', () {
+    test('round-trips P2WPKH and P2TR scriptPubKeys back to addresses', () {
+      for (final addr in [challengeAddress, proofAddress]) {
+        final spk = parseAddress(addr, Network.mainnet).scriptPubKey.bytes;
+        final encoded = Bip322.addressFromScriptPubKey(
+          spk,
+          network: Network.mainnet,
+        );
+        expect(encoded, addr);
+      }
+    });
+  });
+
   group('self-contained verify', () {
     test('recovers message + challenge and verifies as valid', () {
       final result = Bip322.verifyProofOfFundsFromSignature(signature());

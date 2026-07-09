@@ -73,6 +73,32 @@ class Bip322 {
     return segwit.encode(Segwit(network.bech32Hrp, 0, keyHash));
   }
 
+  /// Encodes a P2WPKH or P2TR [scriptPubKey] as its address string on
+  /// [network] — the inverse of [parseAddress] for the two supported types.
+  ///
+  /// Useful for displaying the challenge address recovered from a Proof of
+  /// Funds (see [verifyProofOfFundsFromSignature] /
+  /// [ProofOfFundsResult.challengeScriptPubKey]). Returns `null` for any other
+  /// script type (P2PKH/P2SH/P2WSH/unrecognised) rather than throwing, since
+  /// callers use it for presentation, not validation.
+  static String? addressFromScriptPubKey(
+    Uint8List scriptPubKey, {
+    Network network = Network.mainnet,
+  }) {
+    final classified = classifyScriptPubKey(Script(scriptPubKey));
+    if (classified == null) return null;
+    switch (classified.type) {
+      case AddressType.p2wpkh:
+        return segwit.encode(Segwit(network.bech32Hrp, 0, classified.payload));
+      case AddressType.p2tr:
+        return encodeBech32mSegwit(network.bech32Hrp, 1, classified.payload);
+      case AddressType.p2pkh:
+      case AddressType.p2sh:
+      case AddressType.p2wsh:
+        return null;
+    }
+  }
+
   /// Signs [message] for [address], returning a BIP-322 signature string.
   ///
   /// Segwit/taproot addresses produce a "simple" (`smp`-prefixed) signature.
