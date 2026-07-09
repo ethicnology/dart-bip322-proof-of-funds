@@ -21,8 +21,8 @@ environment:
 dependencies:
   bip341:
     git:
-      url: git@github.com:ethicnology/dart-bip341-taproot.git
-      ref: main
+      url: https://github.com/ethicnology/dart-bip341-taproot.git
+      ref: de18b43a0b2510f6865f31f783a7ee540c4a4680
   elliptic: ^0.3.12
   ecdsa: ^0.1.2
   bip340: ^0.3.1
