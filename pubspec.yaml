@@ -22,11 +22,11 @@ dependencies:
   bip341:
     git:
       url: https://github.com/ethicnology/dart-bip341-taproot.git
-      ref: de18b43a0b2510f6865f31f783a7ee540c4a4680
+      ref: e2e3e5fbb9b3551822c5f43903e441a83c2ce0dd
   elliptic: ^0.3.12
   ecdsa: ^0.1.2
   bip340: ^0.3.1
-  pointycastle: ^4.0.0
+  pointycastle: ">=3.7.4 <5.0.0"
   bech32: ^0.2.2
   bs58check: ^1.0.2
   hex: ^0.2.0
