@@ -102,9 +102,21 @@ Uint8List ecdsaSignDer(PrivateKey priv, List<int> hash32) {
 ///
 /// [pubBytes] and [der] are attacker-controlled (witness data from an
 /// untrusted signature) — a well-formed-length but off-curve public key or a
-/// structurally-invalid DER encoding must fail closed (`false`), not throw:
-/// `PublicKey.fromHex` throws for a point not on the curve, and
-/// `Signature.fromDER` throws for malformed ASN.1.
+/// structurally-invalid DER encoding must fail closed (`false`), never throw.
+///
+/// The failure modes span *both* halves of Dart's error hierarchy, so the
+/// guard below deliberately catches everything (`catch (_)`), not just
+/// `Exception`:
+///   - `PublicKey.fromHex` throws an `EllipticException` (an `Exception`) for
+///     an off-curve point or a bad length/prefix.
+///   - `ecdsa.Signature.fromDER` delegates to `ninja_asn1`, whose
+///     `ASN1Sequence.parse` can yield a sequence with fewer than two children
+///     (or non-`ASN1Integer` children) for a malformed-but-decodable DER blob;
+///     the `ecdsa` package then does `p.children[0]/[1] as ASN1Integer`, which
+///     throws a `RangeError`/`TypeError` — Dart `Error`s, *not* `Exception`s.
+/// A verify function whose entire purpose is evaluating untrusted witness data
+/// must treat every one of these as "not a valid signature" and return
+/// `false`, matching bip341's `verifyControlBlock` fail-closed policy.
 bool ecdsaVerifyDer(List<int> pubBytes, List<int> hash32, List<int> der) {
   try {
     final pub = PublicKey.fromHex(secp256k1, HEX.encode(pubBytes));
@@ -119,7 +131,7 @@ bool ecdsaVerifyDer(List<int> pubBytes, List<int> hash32, List<int> der) {
       return false;
     }
     return ecdsa.verify(pub, hash32, sig);
-  } on Exception {
+  } catch (_) {
     return false;
   }
 }

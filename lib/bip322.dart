@@ -28,9 +28,15 @@ export 'src/proof_of_funds.dart'
         ProofOfFundsUtxo,
         ProofOfFundsResult,
         ProofOfFundsStatus,
+        ProvenUtxo,
         classifyScriptPubKey;
 export 'src/psbt.dart'
-    show DecodedPsbt, PsbtInputUtxo, encodeFinalizedPsbt, decodePsbt;
+    show
+        DecodedPsbt,
+        PsbtInputUtxo,
+        NonWitnessUtxoCache,
+        encodeFinalizedPsbt,
+        decodePsbt;
 export 'src/script.dart' show Script;
 export 'src/transaction.dart' show Transaction, TxIn, TxOut, OutPoint;
 export 'src/witness.dart' show WitnessStack;

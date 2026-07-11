@@ -26,6 +26,25 @@ const int _inWitnessUtxo = 0x01;
 const int _inFinalScriptSig = 0x07;
 const int _inFinalScriptWitness = 0x08;
 
+/// A cache of `non_witness_utxo` transactions decoded during a single PSBT
+/// verification. BIP-322 allows one full previous transaction to back several
+/// inputs (spending different outputs of it); repeatedly decoding — and
+/// re-parsing — the same bytes per input is wasteful. Caching by the raw bytes
+/// means each distinct `non_witness_utxo` is decoded exactly once and reused.
+/// Pass one instance across all [PsbtInputUtxo.resolve] calls of a
+/// [DecodedPsbt].
+class NonWitnessUtxoCache {
+  final Map<String, Transaction> _byRawBytes = {};
+
+  /// Decodes [rawTx] once, reusing the cached [Transaction] for any later call
+  /// with byte-identical input (the common case: one shared previous
+  /// transaction referenced by several inputs).
+  Transaction decode(Uint8List rawTx) =>
+      _byRawBytes.putIfAbsent(String.fromCharCodes(rawTx), () {
+        return _decodeLegacyTransaction(rawTx);
+      });
+}
+
 /// The UTXO an input spends, as recorded in a PSBT input map — either the
 /// [witnessUtxo] (amount + scriptPubKey only, used for segwit-native inputs)
 /// or the [nonWitnessUtxo] (the full previous transaction, used for legacy
@@ -36,13 +55,34 @@ class PsbtInputUtxo {
 
   PsbtInputUtxo({this.witnessUtxo, this.nonWitnessUtxo});
 
-  /// The spent output's amount and scriptPubKey, however it was recorded.
-  /// Throws [DeserializationException] if neither UTXO field was present, or
-  /// if [nonWitnessUtxo] doesn't actually have an output at [outputIndex].
-  TxOut resolve(int outputIndex) {
+  /// The spent output's amount and scriptPubKey for the outpoint [prevout] this
+  /// input spends.
+  ///
+  /// For a [nonWitnessUtxo], the supplied full previous transaction is bound to
+  /// the outpoint it is supposed to describe: its recomputed txid MUST equal
+  /// `prevout.hash`. Without this check a prover could attach an arbitrary
+  /// transaction that merely happens to have an output of the desired shape at
+  /// [prevout.index], with no link to the outpoint the PSBT references —
+  /// defeating the whole point of carrying the previous transaction. A
+  /// mismatch is a [DeserializationException].
+  ///
+  /// [cache] deduplicates decoding of a `non_witness_utxo` shared across
+  /// inputs (see [NonWitnessUtxoCache]); pass `null` to decode standalone.
+  ///
+  /// Throws [DeserializationException] if neither UTXO field was present, if
+  /// the [nonWitnessUtxo] txid doesn't match `prevout.hash`, or if it has no
+  /// output at `prevout.index`.
+  TxOut resolve(OutPoint prevout, {NonWitnessUtxoCache? cache}) {
     if (witnessUtxo != null) return witnessUtxo!;
     if (nonWitnessUtxo != null) {
-      final prevTx = _decodeLegacyTransaction(nonWitnessUtxo!);
+      final prevTx = (cache ?? NonWitnessUtxoCache()).decode(nonWitnessUtxo!);
+      if (!bytesEqual(prevTx.hashForId(), prevout.hash)) {
+        throw DeserializationException(
+          'non-witness UTXO txid ${prevTx.txid()} does not match the '
+          'referenced outpoint',
+        );
+      }
+      final outputIndex = prevout.index;
       if (outputIndex >= prevTx.outputs.length) {
         throw DeserializationException(
           'non-witness UTXO has no output $outputIndex',
@@ -220,11 +260,23 @@ DecodedPsbt decodePsbt(Uint8List bytes) {
 /// Reads key-value pairs until the zero-length-key map terminator. Each yielded
 /// tuple is `(keyType, keyData, value)` — `keyData` is whatever follows the
 /// single key-type byte (empty for every key type this codec supports).
+///
+/// Rejects a map that repeats a full key (`key-type || key-data`): BIP-174
+/// requires keys to be unique within a map, and silently keeping the
+/// last-seen duplicate is a malleability vector (two distinct byte strings
+/// decoding to the same logical PSBT, or a field an intermediary can quietly
+/// override). A duplicate is a [DeserializationException].
 Iterable<(int, Uint8List, Uint8List)> _readMap(ByteReader reader) sync* {
+  final seenKeys = <String>{};
   while (true) {
     final keyLen = reader.readCompactSize();
     if (keyLen == 0) return; // map terminator
     final key = reader.read(keyLen);
+    if (!seenKeys.add(String.fromCharCodes(key))) {
+      throw DeserializationException(
+        'duplicate PSBT key (type 0x${key[0].toRadixString(16)}) in map',
+      );
+    }
     final valueLen = reader.readCompactSize();
     final value = reader.read(valueLen);
     yield (key[0], Uint8List.fromList(key.sublist(1)), value);
@@ -243,7 +295,7 @@ Uint8List _kv(int keyType, List<int> keyData, List<int> value) => concatBytes([
 
 TxOut _decodeTxOut(Uint8List bytes) {
   final reader = ByteReader(bytes);
-  final value = reader.readUint64LE();
+  final value = reader.readAmount();
   final spkLen = reader.readCompactSize();
   final spk = reader.read(spkLen);
   if (!reader.isEmpty) {
@@ -276,7 +328,7 @@ Transaction _decodeLegacyTransaction(Uint8List bytes) {
   final outCount = reader.readCompactSize();
   final outputs = <TxOut>[];
   for (var i = 0; i < outCount; i++) {
-    final value = reader.readUint64LE();
+    final value = reader.readAmount();
     final spkLen = reader.readCompactSize();
     final spk = reader.read(spkLen);
     outputs.add(TxOut(value: value, scriptPubKey: Script(spk)));

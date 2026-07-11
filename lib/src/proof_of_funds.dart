@@ -58,20 +58,55 @@ class ProofOfFundsUtxo {
 /// - [invalid]: a structural check or a signature failed.
 enum ProofOfFundsStatus { valid, inconclusive, invalid }
 
+/// One additional input whose signature verified in a Proof of Funds.
+///
+/// Crucially this carries the **[amount] and [scriptPubKey] the signature was
+/// actually computed over**, not just the [outPoint]. Both values come from
+/// the prover-supplied PSBT (`witness_utxo`/`non_witness_utxo`) — the proof is
+/// only self-consistent, it does not prove these match the real on-chain UTXO.
+/// A caller MUST fetch (amount, scriptPubKey) for [outPoint] from a trusted
+/// source (the UTXO set / a block explorer) and compare them to these fields
+/// before trusting the funds: an outpoint's mere existence is not enough,
+/// because a malicious prover can reference any rich outpoint while supplying
+/// its own fabricated amount/scriptPubKey (which is what its key actually
+/// signs). Exposing them here is what makes that comparison possible.
+class ProvenUtxo {
+  /// The prevout (txid + vout) of the proven input.
+  final OutPoint outPoint;
+
+  /// The satoshi amount the verified signature committed to — as claimed by
+  /// the prover's PSBT. Compare against the real on-chain value.
+  final int amount;
+
+  /// The scriptPubKey the verified signature committed to — as claimed by the
+  /// prover's PSBT. Compare against the real on-chain scriptPubKey.
+  final Uint8List scriptPubKey;
+
+  ProvenUtxo(this.outPoint, this.amount, this.scriptPubKey);
+
+  /// The prevout hash (internal/wire byte order). Convenience shortcut for
+  /// `outPoint.hash`, preserved for callers that only need the outpoint.
+  Uint8List get hash => outPoint.hash;
+}
+
 /// The result of verifying a Proof of Funds signature. [provenUtxos] lists the
-/// additional-input prevouts (input order, excluding the challenge input)
-/// whose signatures verified cryptographically.
+/// additional inputs (input order, excluding the challenge input) whose
+/// signatures verified cryptographically, each with the (amount, scriptPubKey)
+/// its signature committed to — see [ProvenUtxo] for why those matter.
 ///
 /// This is purely an offline, cryptographic check: it does NOT establish that
-/// [provenUtxos] still exist or are unspent on-chain. Per BIP-322: "validators
+/// [provenUtxos] still exist, are unspent, or even that their claimed
+/// (amount, scriptPubKey) match the real chain. Per BIP-322: "validators
 /// of a proof of funds need access to the current UTXO set... An offline
 /// validator therefore can only attest to the cryptographic validity of the
 /// additional inputs' witness stack, but not its blockchain state." Pair this
-/// result with an external UTXO-set lookup (e.g. an Electrum/Esplora client)
-/// to confirm [provenUtxos] are real and unspent before trusting the proof.
+/// result with an external UTXO-set lookup (e.g. an Electrum/Esplora client):
+/// for each entry, confirm [ProvenUtxo.outPoint] exists and is unspent AND
+/// that its on-chain (amount, scriptPubKey) equal [ProvenUtxo.amount] /
+/// [ProvenUtxo.scriptPubKey] before trusting the proof.
 class ProofOfFundsResult {
   final ProofOfFundsStatus status;
-  final List<OutPoint> provenUtxos;
+  final List<ProvenUtxo> provenUtxos;
 
   /// nLockTime of `to_sign` — "T" in the spec's "valid at time T and age S".
   final int lockTime;
@@ -318,7 +353,7 @@ ProofOfFundsResult verifyProofOfFundsFromSignature(String signature) {
   try {
     challengeScriptPubKey = Uint8List.fromList(
       decoded.utxos[0]
-          .resolve(decoded.transaction.inputs[0].prevout.index)
+          .resolve(decoded.transaction.inputs[0].prevout)
           .scriptPubKey
           .bytes,
     );
@@ -420,10 +455,14 @@ ProofOfFundsResult _verifyDecodedProofOfFunds({
 
   final amounts = <int>[];
   final scriptPubKeys = <Uint8List>[];
+  final utxoCache = NonWitnessUtxoCache();
   for (var i = 0; i < toSign.inputs.length; i++) {
     final TxOut spent;
     try {
-      spent = decoded.utxos[i].resolve(toSign.inputs[i].prevout.index);
+      spent = decoded.utxos[i].resolve(
+        toSign.inputs[i].prevout,
+        cache: utxoCache,
+      );
     } on Bip322Exception {
       return invalid();
     }
@@ -447,7 +486,7 @@ ProofOfFundsResult _verifyDecodedProofOfFunds({
     return invalid();
   }
 
-  final proven = <OutPoint>[];
+  final proven = <ProvenUtxo>[];
   var inconclusive = false;
   for (var i = 1; i < toSign.inputs.length; i++) {
     final classified = classifyScriptPubKey(Script(scriptPubKeys[i]));
@@ -465,7 +504,13 @@ ProofOfFundsResult _verifyDecodedProofOfFunds({
     )) {
       return invalid();
     }
-    proven.add(toSign.inputs[i].prevout);
+    proven.add(
+      ProvenUtxo(
+        toSign.inputs[i].prevout,
+        amounts[i],
+        Uint8List.fromList(scriptPubKeys[i]),
+      ),
+    );
   }
 
   // BIP-322 "upgradeable rules": an unrecognised to_sign version is

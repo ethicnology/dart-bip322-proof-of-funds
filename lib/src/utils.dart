@@ -32,6 +32,13 @@ Uint8List uint32LE(int value) {
   return b.buffer.asUint8List();
 }
 
+/// The maximum spendable Bitcoin amount, in satoshis (21e6 BTC * 1e8). No
+/// valid transaction output — and therefore no valid PSBT UTXO amount — can
+/// exceed this (Bitcoin consensus `MAX_MONEY`). It is also comfortably within
+/// the 2^53 JS safe-integer range, so amounts up to this bound round-trip
+/// identically on the VM and on the web.
+const int maxMoney = 21000000 * 100000000;
+
 /// Little-endian encoding of a 64-bit unsigned integer (Bitcoin amounts).
 ///
 /// Built from two 32-bit halves rather than `ByteData.setUint64`: the latter
@@ -106,21 +113,84 @@ class ByteReader {
       ByteData.sublistView(read(4)).getUint32(0, Endian.little);
 
   /// See [uint64LE] for why this avoids `ByteData.getUint64` (dart2js).
+  ///
+  /// Rejects any value that does not fit in Dart's 2^53 JS-safe-integer range:
+  /// a field at/above `2^53` (in particular a full `0xFFFF...FF`) would either
+  /// wrap to a negative `int` on the 64-bit VM or lose precision on the web,
+  /// and — for an amount — would later crash the unsigned encoder [uint64LE]
+  /// with a `NegativeValueError` (an uncaught `Error`) when a sighash is
+  /// recomputed, breaking the "never throws for malformed data" contract of the
+  /// verify entry points. Failing closed here, as a [DeserializationException]
+  /// (a [Bip322Exception] the verify paths already catch), keeps that contract.
+  ///
+  /// This is the raw 64-bit field reader (used for both amounts and the
+  /// `0xff` CompactSize case); [readAmount] applies the additional Bitcoin
+  /// `MAX_MONEY` consensus bound where an actual satoshi value is expected.
   int readUint64LE() {
     final view = ByteData.sublistView(read(8));
     final low = view.getUint32(0, Endian.little);
     final high = view.getUint32(4, Endian.little);
-    return high * 0x100000000 + low;
+    final value = high * 0x100000000 + low;
+    // 2^53 - 1 is the largest integer both the VM and dart2js represent
+    // exactly; `value < 0` additionally catches the 64-bit-VM wrap-around.
+    if (value < 0 || value > 0x1fffffffffffff) {
+      throw DeserializationException(
+        'unsigned 64-bit field exceeds the JS-safe integer range: raw '
+        '0x${high.toRadixString(16).padLeft(8, '0')}'
+        '${low.toRadixString(16).padLeft(8, '0')}',
+      );
+    }
+    return value;
   }
 
-  /// Reads a CompactSize integer.
+  /// Reads a Bitcoin output amount (satoshis): a raw 64-bit field additionally
+  /// bounded by consensus `MAX_MONEY`. Rejects out-of-range values as a
+  /// [DeserializationException] so a malformed/adversarial `witness_utxo` or
+  /// `non_witness_utxo` amount resolves to a fail-closed "invalid", never an
+  /// uncaught `Error` from downstream unsigned encoding.
+  int readAmount() {
+    final value = readUint64LE();
+    if (value > maxMoney) {
+      throw DeserializationException(
+        'amount out of range (0..$maxMoney sats): $value',
+      );
+    }
+    return value;
+  }
+
+  /// Reads a CompactSize integer, enforcing Bitcoin's **minimal-encoding**
+  /// rule: a value must use the shortest of the four length prefixes that can
+  /// hold it. A non-minimal encoding (e.g. `0xfd 0x05 0x00` for the value 5,
+  /// which fits in a single byte) is a serialization-malleability vector —
+  /// distinct byte strings decoding to the same logical value — and is rejected
+  /// as a [DeserializationException], matching Bitcoin Core's `ReadCompactSize`.
   int readCompactSize() {
     final first = readUint8();
     if (first < 0xfd) return first;
     if (first == 0xfd) {
-      return ByteData.sublistView(read(2)).getUint16(0, Endian.little);
+      final value = ByteData.sublistView(read(2)).getUint16(0, Endian.little);
+      if (value < 0xfd) {
+        throw DeserializationException(
+          'non-minimal CompactSize: $value encoded with 0xfd prefix',
+        );
+      }
+      return value;
     }
-    if (first == 0xfe) return readUint32LE();
-    return readUint64LE();
+    if (first == 0xfe) {
+      final value = readUint32LE();
+      if (value <= 0xffff) {
+        throw DeserializationException(
+          'non-minimal CompactSize: $value encoded with 0xfe prefix',
+        );
+      }
+      return value;
+    }
+    final value = readUint64LE();
+    if (value <= 0xffffffff) {
+      throw DeserializationException(
+        'non-minimal CompactSize: $value encoded with 0xff prefix',
+      );
+    }
+    return value;
   }
 }

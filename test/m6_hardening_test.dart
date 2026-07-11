@@ -449,6 +449,106 @@ void main() {
       expect(program32.length, 32);
     });
   });
+
+  group('fail-closed on Error-throwing malformed data', () {
+    test(
+      'malformed DER in a P2WPKH simple signature resolves to false, '
+      'never throws (finding #7)',
+      () {
+        // Recover the real 33-byte compressed pubkey from the known-good
+        // signature so the witness passes the pubkey/hash160 checks and the
+        // code path actually reaches DER parsing.
+        final goodPayload = base64.decode(
+          base64.normalize(validP2wpkhSig.substring(3)),
+        );
+        final goodStack = WitnessStack.fromBytes(goodPayload);
+        final pub = goodStack.items[1];
+
+        // A DER SEQUENCE with a single INTEGER child (0x30 0x03 0x02 0x01 0x00):
+        // the `ecdsa` package accesses children[1] and throws a RangeError (a
+        // Dart Error, not an Exception). Before the fix this escaped every
+        // catch and crashed Bip322.verify.
+        final malformedSigItem = <int>[0x30, 0x03, 0x02, 0x01, 0x00, 0x01];
+        final badStack = WitnessStack([malformedSigItem, pub]);
+        final badSig = 'smp${base64.encode(badStack.toBytes())}';
+
+        // Must NOT throw — and must be false.
+        expect(
+          Bip322.verify(
+            message: 'hello',
+            address: p2wpkhAddress,
+            signature: badSig,
+          ),
+          isFalse,
+        );
+      },
+    );
+
+    test(
+      'adversarial 0xFFFFFFFFFFFFFFFF amount in a proof-of-funds PSBT '
+      'resolves to invalid, never throws (finding #4)',
+      () {
+        // Build a genuine proof of funds, then corrupt the witness-utxo amount
+        // to the maximum 64-bit value and confirm verification fails closed.
+        final priv =
+            'C0DEC0DEC0DEC0DEC0DEC0DEC0DEC0DEC0DEC0DEC0DEC0DEC0DEC0DEC0DEC0DE';
+        final challenge = Bip322.p2wpkhAddress(priv);
+        final proofAddr = Bip322.p2trAddress(priv);
+        final proofSpk = parseAddress(proofAddr, Network.mainnet).scriptPubKey;
+
+        final sig = Bip322.signProofOfFunds(
+          message: 'proof',
+          address: challenge,
+          privateKey: priv,
+          proofUtxos: [
+            ProofOfFundsUtxo(
+              prevout: OutPoint(List.filled(32, 0x01), 0),
+              amount: 100000,
+              scriptPubKey: proofSpk,
+              privateKey: priv,
+            ),
+          ],
+        );
+
+        // Decode PSBT bytes, splice 0xFF*8 over the first witness-utxo amount.
+        final psbtBytes = base64.decode(base64.normalize(sig.substring(3)));
+        // Find the 8-byte little-endian value 100000 (0xA0 0x86 0x01 0x00 ...)
+        // of the proof UTXO and overwrite with 0xFF*8. 100000 = 0x0186A0.
+        final needle = <int>[0xA0, 0x86, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00];
+        var idx = -1;
+        for (var i = 0; i + needle.length <= psbtBytes.length; i++) {
+          var match = true;
+          for (var j = 0; j < needle.length; j++) {
+            if (psbtBytes[i + j] != needle[j]) {
+              match = false;
+              break;
+            }
+          }
+          if (match) {
+            idx = i;
+            break;
+          }
+        }
+        expect(idx, isNonNegative, reason: 'proof amount not found in PSBT');
+        for (var j = 0; j < 8; j++) {
+          psbtBytes[idx + j] = 0xFF;
+        }
+        final tampered = 'pof${base64.encode(psbtBytes)}';
+
+        // verifyProofOfFunds must resolve to a status, never throw.
+        late ProofOfFundsResult result;
+        expect(
+          () => result = Bip322.verifyProofOfFunds(
+            message: 'proof',
+            address: challenge,
+            signature: tampered,
+          ),
+          returnsNormally,
+        );
+        expect(result.status, ProofOfFundsStatus.invalid);
+      },
+    );
+  });
 }
 
 /// Encodes a segwit address using the plain BIP-173 (bech32, non-m) checksum

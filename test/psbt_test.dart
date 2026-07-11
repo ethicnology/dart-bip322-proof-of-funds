@@ -51,7 +51,9 @@ void main() {
         HEX.encode(decoded.transaction.outputs.single.toBytes()),
         HEX.encode(tx.outputs.single.toBytes()),
       );
-      final resolved = decoded.utxos.single.resolve(0);
+      final resolved = decoded.utxos.single.resolve(
+        decoded.transaction.inputs.single.prevout,
+      );
       expect(resolved.value, 100000);
       expect(HEX.encode(resolved.scriptPubKey.bytes), HEX.encode(spk.bytes));
     });
@@ -92,8 +94,14 @@ void main() {
       final decoded = decodePsbt(encodeFinalizedPsbt(tx, spent));
       expect(decoded.transaction.inputs.length, 2);
       expect(decoded.utxos.length, 2);
-      expect(decoded.utxos[0].resolve(0).value, 50000);
-      expect(decoded.utxos[1].resolve(1).value, 75000);
+      expect(
+        decoded.utxos[0].resolve(decoded.transaction.inputs[0].prevout).value,
+        50000,
+      );
+      expect(
+        decoded.utxos[1].resolve(decoded.transaction.inputs[1].prevout).value,
+        75000,
+      );
       // Input order must be preserved exactly (index 0 is always the BIP-322
       // challenge input; reordering would silently break verification).
       expect(decoded.transaction.inputs[0].prevout.hash, bytes32(0x01));
@@ -187,7 +195,7 @@ void main() {
   group('PsbtInputUtxo.resolve', () {
     test('throws when no UTXO field is set', () {
       expect(
-        () => PsbtInputUtxo().resolve(0),
+        () => PsbtInputUtxo().resolve(OutPoint(bytes32(0x01), 0)),
         throwsA(isA<DeserializationException>()),
       );
     });
@@ -205,7 +213,29 @@ void main() {
       final utxo = PsbtInputUtxo(
         nonWitnessUtxo: prevTx.serialize(withWitness: false),
       );
-      expect(utxo.resolve(1).value, 222);
+      // The referenced outpoint must carry the real txid of the supplied
+      // previous transaction (finding #2): resolve binds the two.
+      expect(utxo.resolve(OutPoint(prevTx.hashForId(), 1)).value, 222);
+    });
+
+    test('rejects a nonWitnessUtxo whose txid does not match the outpoint', () {
+      final prevTx = Transaction(
+        version: 2,
+        lockTime: 0,
+        inputs: [TxIn(prevout: OutPoint(bytes32(0x01), 0))],
+        outputs: [
+          TxOut(value: 222, scriptPubKey: Script(const [0x00, 0x14])),
+        ],
+      );
+      final utxo = PsbtInputUtxo(
+        nonWitnessUtxo: prevTx.serialize(withWitness: false),
+      );
+      // A different (wrong) txid for the same output index must fail closed,
+      // not silently return the attacker-supplied output.
+      expect(
+        () => utxo.resolve(OutPoint(bytes32(0xEE), 0)),
+        throwsA(isA<DeserializationException>()),
+      );
     });
   });
 }
